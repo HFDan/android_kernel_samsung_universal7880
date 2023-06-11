@@ -39,6 +39,9 @@
 #include "../function/f_audio_source.c"
 #include "../function/f_midi.c"
 #include "../function/f_mass_storage.c"
+#include "../function/f_hid.h"
+#include "../function/f_hid_android_keyboard.c"
+#include "../function/f_hid_android_mouse.c"
 #include "../function/f_adb.c"
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_MTP
 #include "../function/f_mtp_samsung.c"
@@ -109,6 +112,41 @@ struct android_usb_function {
 	int (*ctrlrequest)(struct android_usb_function *,
 					struct usb_composite_dev *,
 					const struct usb_ctrlrequest *);
+};
+
+static int hid_function_init(struct android_usb_function *f, struct usb_composite_dev *cdev)
+{
+   return ghid_setup(cdev->gadget, 2);
+}
+
+static void hid_function_cleanup(struct android_usb_function *f)
+{
+   ghid_cleanup();
+}
+
+static int hid_function_bind_config(struct android_usb_function *f, struct usb_configuration *c)
+{
+   int ret;
+   printk(KERN_INFO "hid keyboard\n");
+   ret = hidg_bind_config(c, &ghid_device_android_keyboard, 0);
+   if (ret) {
+       pr_info("%s: hid_function_bind_config keyboard failed: %d\n", __func__, ret);
+       return ret;
+   }
+   printk(KERN_INFO "hid mouse\n");
+   ret = hidg_bind_config(c, &ghid_device_android_mouse, 1);
+   if (ret) {
+       pr_info("%s: hid_function_bind_config mouse failed: %d\n", __func__, ret);
+       return ret;
+   }
+   return 0;
+}
+
+static struct android_usb_function hid_function = {
+   .name       = "hid",
+   .init       = hid_function_init,
+   .cleanup    = hid_function_cleanup,
+   .bind_config    = hid_function_bind_config,
 };
 
 struct android_dev {
@@ -257,7 +295,7 @@ static void android_work(struct work_struct *data)
 #ifdef CONFIG_USB_TYPEC_MANAGER_NOTIFIER
 		if (dev->connected) {
 			if (dev->cdev->desc.bcdUSB == 0x310) {
-				set_usb_enumeration_state(0x310);	// Super-Speed	
+				set_usb_enumeration_state(0x310);	// Super-Speed
 			} else {
 				set_usb_enumeration_state(0x210);	// High-Speed
 			}
@@ -275,7 +313,7 @@ static void android_work(struct work_struct *data)
 #ifndef CONFIG_USB_TYPEC_MANAGER_NOTIFIER
 		if (dev->connected && cdev->config) {
 			if (dev->cdev && (dev->cdev->desc.bcdUSB == 0x310)) {
-				dev->usb310_count++;	// Super-Speed	
+				dev->usb310_count++;	// Super-Speed
 			} else {
 				dev->usb210_count++;	// High-Speed
 			}
@@ -1498,7 +1536,8 @@ static struct android_usb_function *supported_functions[] = {
 	&midi_function,
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_CCR_PROTOCOL
 	&ccr_function,
-#endif		
+#endif
+    &hid_function,
 	NULL
 };
 
@@ -1649,8 +1688,9 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 	char buf[256], *b;
 	char aliases[256], *a;
 	int err;
-	int is_ffs;
+	// int is_ffs;
 	int ffs_enabled = 0;
+    int hid_enabled = 0;
 
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
 	g_rndis = 0;
@@ -1677,19 +1717,20 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 		if (!name)
 			continue;
 
-		is_ffs = 0;
+		// is_ffs = 0;
 		strlcpy(aliases, dev->ffs_aliases, sizeof(aliases));
 		a = aliases;
 
 		while (a) {
 			char *alias = strsep(&a, ",");
 			if (alias && !strcmp(name, alias)) {
-				is_ffs = 1;
+				// is_ffs = 1;
+                name = "ffs";
 				break;
 			}
 		}
 
-		if (is_ffs) {
+		/*if (is_ffs) {
 			if (ffs_enabled)
 				continue;
 			err = android_enable_function(dev, "ffs");
@@ -1699,12 +1740,35 @@ functions_store(struct device *pdev, struct device_attribute *attr,
 			else
 				ffs_enabled = 1;
 			continue;
-		}
+		}*/
+
+        if (ffs_enabled && !strcmp(name, "ffs"))
+            continue;
+        if (hid_enabled && !strcmp(name, "hid"))
+            continue;
 
 		err = android_enable_function(dev, name);
-		if (err)
-			pr_err("android_usb: Cannot enable '%s' (%d)",
-							   name, err);
+        if (err) {
+            pr_err("android_usb: Cannot enable '%s' (%d)",
+                        name, err);
+            continue;
+        }
+
+        if (!strcmp(name, "ffs"))
+            ffs_enabled = 1;
+
+        if (!strcmp(name, "hid"))
+                hid_enabled = 1;
+
+        if (!hid_enabled) {
+            name = "hid";
+            err = android_enable_function(dev, name);
+            if (err)
+                pr_err("android_usb: Cannot enable '%s' (%d)",
+                                   name, err);
+            else
+                hid_enabled = 1;
+        }
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
 
 			/* Enable ACM function, if MTP is enabled. */
@@ -1810,7 +1874,7 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 		dev->enabled = true;
 #ifdef CONFIG_USB_TYPEC_MANAGER_NOTIFIER
 		set_usb_enable_state();
-#endif		
+#endif
 	} else if (!enabled && dev->enabled) {
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
 		/* avoid sending a disconnect switch event
@@ -2165,7 +2229,7 @@ static void android_disconnect(struct usb_composite_dev *cdev)
 	acc_disconnect();
 
 	dev->connected = 0;
-	
+
 #ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
 	printk(KERN_DEBUG "usb: %s con(%d), sw(%d)\n",
 		 __func__, dev->connected, dev->sw_connected);
@@ -2177,7 +2241,7 @@ static void android_disconnect(struct usb_composite_dev *cdev)
 		printk(KERN_DEBUG"usb: %s mute_switch con(%d) sw(%d)\n",
 			 __func__, dev->connected, dev->sw_connected);
 	} else {
-	
+
 	//	set_ncm_ready(false);
 		if (cdev->force_disconnect) {
 			dev->sw_connected = 1;
